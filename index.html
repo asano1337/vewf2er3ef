@@ -442,7 +442,13 @@ const ACHIEVEMENTS = [
   {id:'squat_150', name:'Приседания 150 кг', emoji:'🦵', desc:'Присядь со 150 кг', check:()=>maxWeightFor('Приседания')>=150},
   {id:'deadlift_200', name:'Становая 200 кг', emoji:'🏋️', desc:'Потяни 200 кг', check:()=>maxWeightFor('Становая')>=200},
   {id:'volume_10k', name:'10 000 кг объёма', emoji:'📊', desc:'Набери 10 000 кг за месяц', check:()=>monthVolume()>=10000},
-  {id:'early_bird', name:'Ранняя пташка', emoji:'🌅', desc:'Тренировка до 8 утра', check:s=>s.workouts.some(w=>new Date(w.date).getHours()<8)}
+    {id:'early_bird', name:'Ранняя пташка', emoji:'🌅', desc:'Тренировка до 8 утра', check:s=>s.workouts.some(w=>new Date(w.date).getHours()<8)},
+  {id:'water_first_liter', name:'Первый литр', emoji:'💧', desc:'Выпей литр воды за день', check:()=>waterToday()>=1000},
+  {id:'water_norm', name:'Норма воды', emoji:'💧', desc:'Закрой норму воды за день', check:()=>{const n=waterNorm()*1000;return waterToday()>=n&&n>0;}},
+  {id:'water_week', name:'Неделя воды', emoji:'🌊', desc:'7 дней подряд закрывай норму', check:()=>waterStreakDays()>=7},
+  {id:'water_month', name:'Месяц воды', emoji:'🌊', desc:'30 дней подряд закрывай норму', check:()=>waterStreakDays()>=30},
+  {id:'water_100l', name:'Гидратация', emoji:'🏆', desc:'Выпей 100 литров всего', check:()=>waterTotal()>=100000}
+];
 ];
 
 /* ---------- STATE ---------- */
@@ -454,7 +460,7 @@ function loadState(){
     user:{goal:null,level:null,program:null,name:firstName(),customPrograms:[],restTime:90,isPremium:false,
       profile:emptyProfile(),questPoints:0,streakFreezes:1,frozenDays:[],freezeLastGrant:null,premiumFreezeGrant:null,
       playlists:[],activePlaylist:0,reminders:null},
-    quests:{date:null,items:[],completedCount:0}, waterLog:{date:null,ml:0}, theme:'dark',
+    quests:{date:null,items:[],completedCount:0}, waterLog:{date:null,ml:0}, waterHistory:[], sleepLog:{date:null,hours:0}, sleepHistory:[], dailyCalories:[], theme:'dark',
     workouts:[], currentDayIndex:0, points:0, onboardingDone:false, achievements:[]
   };
 }
@@ -475,7 +481,10 @@ function migrate(s){
   s.user.premiumFreezeGrant = s.user.premiumFreezeGrant||null;
   s.quests = s.quests || {date:null,items:[],completedCount:0};
   s.waterLog = s.waterLog || {date:null,ml:0};
-  s.user.playlists = s.user.playlists || [];
+s.waterHistory = s.waterHistory || [];
+s.sleepLog = s.sleepLog || {date:null,hours:0};
+s.sleepHistory = s.sleepHistory || [];
+s.dailyCalories = s.dailyCalories || [];  s.user.playlists = s.user.playlists || [];
   if(s.user.activePlaylist === undefined) s.user.activePlaylist = 0;
   if(s.user.musicPlaylist){ s.user.playlists.push({name:'Мой плейлист',url:s.user.musicPlaylist}); delete s.user.musicPlaylist; }
   s.workouts = (s.workouts||[]).map(w=>{
@@ -656,10 +665,85 @@ function waterNorm(){
   if(w) return Math.round(w*30/100)/10;
   return 2.5;
 }
+function waterToday(){
+  const h = state.waterLog;
+  return (h && h.date === todayStr()) ? (h.ml||0) : 0;
+}
+function waterTotal(){
+  if(!state.waterHistory || !state.waterHistory.length) return 0;
+  return state.waterHistory.reduce((s,x)=>s+(x.ml||0),0);
+}
+function waterStreakDays(){
+  if(!state.waterHistory || !state.waterHistory.length) return 0;
+  const norm = waterNorm()*1000;
+  const byDate = {};
+  state.waterHistory.forEach(x=>{ byDate[x.date]=x.ml||0; });
+  let s=0; let cursor = new Date();
+  for(let i=0;i<365;i++){
+    const k = cursor.toLocaleDateString('sv-SE');
+    if((byDate[k]||0) >= norm){ s++; cursor.setDate(cursor.getDate()-1); }
+    else break;
+  }
+  return s;
+}
 function waterState(){
   if(!state.waterLog || state.waterLog.date !== todayStr())
     state.waterLog = {date:todayStr(), ml:0};
   return state.waterLog;
+}
+function sleepState(){
+  if(!state.sleepLog || state.sleepLog.date !== todayStr())
+    state.sleepLog = {date:todayStr(), hours:0};
+  return state.sleepLog;
+}
+function setSleep(hours){
+  const s = sleepState();
+  s.hours = Math.max(0, Math.min(12, hours));
+  const t = todayStr();
+  if(!state.sleepHistory) state.sleepHistory = [];
+  const h = state.sleepHistory.find(x => x.date === t);
+  if(h) h.hours = s.hours;
+  else state.sleepHistory.push({date:t, hours:s.hours});
+  state.sleepHistory = state.sleepHistory.slice(-30);
+  saveState();
+  haptic('light');
+  const a = document.querySelector('.dock-btn.active');
+  if(a && a.dataset.tab==='home') renderHome();
+  if($('profileScreen').classList.contains('show')) renderProfile();
+}
+function sleepCard(){
+  const s = sleepState();
+  const hours = s.hours;
+  const quality = hours >= 8 ? {t:'Отлично', c:'var(--success)'} : hours >= 7 ? {t:'Хорошо', c:'var(--accent)'} : hours >= 6 ? {t:'Нормально', c:'var(--gold)'} : hours > 0 ? {t:'Мало', c:'var(--danger)'} : {t:'Не указано', c:'var(--text-secondary)'};
+  const hist = (state.sleepHistory||[]).slice(-7);
+  let chart = '';
+  if(hist.length >= 2){
+    const W = 280, H = 50;
+    const pts = hist.map((x,i) => {
+      const px = (i/(hist.length-1))*W;
+      const py = H - Math.min(1, x.hours/10) * H;
+      return `${px.toFixed(1)},${py.toFixed(1)}`;
+    }).join(' ');
+    chart = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="margin-top:12px;">
+      <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="sub" style="font-size:11px; text-align:center; margin-top:2px;">последние ${hist.length} дн.</div>`;
+  } else {
+    chart = `<div class="sub" style="font-size:12px; text-align:center; margin-top:10px;">Отмечай сон несколько дней — построим график</div>`;
+  }
+  return `<div class="card" style="animation-delay:.095s;">
+    <div class="h2">😴 Сон</div>
+    <div class="ring-row" style="justify-content:space-between;">
+      <div>
+        <div class="stat-num" style="font-size:26px;">${hours} <span class="sub" style="font-size:14px;">ч</span></div>
+        <div class="sub" style="color:${quality.c}; font-weight:700;">${quality.t}</div>
+      </div>
+      <div style="display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;">
+        ${[5,6,7,8,9].map(h=>`<button class="btn-secondary tappable" data-sleep="${h}" style="padding:8px 10px; font-size:12px; ${hours===h?'background:var(--accent); color:#0A0B0F; border-color:var(--accent);':''}">${h}ч</button>`).join('')}
+      </div>
+    </div>
+    ${chart}
+  </div>`;
 }
 function waterCard(){
   const s = waterState();
@@ -667,6 +751,23 @@ function waterCard(){
   const liters = (s.ml/1000).toFixed(2).replace(/\.?0+$/,'');
   const pct = Math.min(100, s.ml/(norm*1000)*100);
   const R=28, C=2*Math.PI*R, off=C*(1-pct/100);
+  const hist = (state.waterHistory||[]).slice(-7);
+  let chart = '';
+  if(hist.length >= 2){
+    const maxV = Math.max(norm*1000, ...hist.map(x=>x.ml));
+    const W = 280, H = 50;
+    const pts = hist.map((x,i)=>{
+      const px = (i/(hist.length-1))*W;
+      const py = H - (x.ml/maxV)*H;
+      return `${px.toFixed(1)},${py.toFixed(1)}`;
+    }).join(' ');
+    chart = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none" style="margin-top:12px;">
+      <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="sub" style="font-size:11px; text-align:center; margin-top:2px;">последние ${hist.length} дн.</div>`;
+  } else {
+    chart = `<div class="sub" style="font-size:12px; text-align:center; margin-top:10px;">Добавляй воду несколько дней — построим график</div>`;
+  }
   return `<div class="card" style="animation-delay:.09s;">
     <div class="h2">💧 Вода</div>
     <div class="ring-row" style="justify-content:space-between;">
@@ -688,20 +789,28 @@ function waterCard(){
       <button class="btn-primary" data-water="0.5" style="padding:10px 6px; font-size:12px;">+500</button>
       <button class="btn-primary" data-water="1" style="padding:10px 6px; font-size:12px;">+1 л</button>
     </div>
+    ${chart}
   </div>`;
 }
 function waterStep(liters){
   const s = waterState();
   const was = s.ml;
   s.ml = Math.max(0, s.ml + Math.round(liters*1000));
+  const t = todayStr();
+  if(!state.waterHistory) state.waterHistory = [];
+  const h = state.waterHistory.find(x => x.date === t);
+  if(h) h.ml = s.ml;
+  else state.waterHistory.push({date:t, ml:s.ml});
+  state.waterHistory = state.waterHistory.slice(-30);
   saveState();
   const norm = waterNorm()*1000;
   if(was<norm && s.ml>=norm){ notify('success'); popup('Норма воды закрыта! 💧','Отличная работа.'); }
-  const a = document.querySelector('.dock-btn.active');
+    const a = document.querySelector('.dock-btn.active');
   if(a && a.dataset.tab==='home') renderHome();
   if($('profileScreen').classList.contains('show')) renderProfile();
+  checkAchievements();
 }
-
+}
 /* ---------- ONBOARDING ---------- */
 let obStep = 0;
 let obChoice = {goal:null, level:null, program:null};
@@ -817,8 +926,9 @@ function renderHome(){
       </div>
       <button class="btn-secondary" data-warmup style="width:100%; margin-top:10px;">🤸 Разминка (~4 мин)</button>
     </div>
-    ${streakCard()}
+        ${streakCard()}
     ${waterCard()}
+    ${sleepCard()}
     <div class="card" style="animation-delay:.1s;">
       <div class="h2">Прогресс недели</div>
       <div class="ring-row">
@@ -980,11 +1090,51 @@ function showRestTimer(onDone){
     if(num) num.textContent = remaining+'с';
   }, 1000);
 }
-
+function estimateWorkoutCalories(){
+  // приблизительная оценка: 6-8 ккал в минуту для силовой тренировки
+  const s = session; if(!s) return 0;
+  const sets = s.exercises.reduce((a,e)=>a+e.sets.length,0);
+  const vol = s.exercises.reduce((a,e)=>a+e.sets.reduce((ss,st)=>ss+st.weight*st.reps,0),0);
+  const minutes = Math.max(20, Math.round(vol / 200)); // условная формула
+  return Math.round(minutes * 7); // ~7 ккал/мин
+}
+function saveDailyCalories(){
+  const kcal = estimateWorkoutCalories();
+  const t = todayStr();
+  if(!state.dailyCalories) state.dailyCalories = [];
+  const h = state.dailyCalories.find(x => x.date === t);
+  if(h) h.kcal = (h.kcal||0) + kcal;
+  else state.dailyCalories.push({date:t, kcal});
+  state.dailyCalories = state.dailyCalories.slice(-30);
+}
+function caloriesCard(){
+  const hist = (state.dailyCalories||[]).slice(-7);
+  if(hist.length < 2) return '';
+  const m = metrics();
+  const tdee = m ? m.tdee : 2000;
+  const maxV = Math.max(tdee*0.3, ...hist.map(x=>x.kcal));
+  const W = 280, H = 60;
+  const bars = hist.map((x,i)=>{
+    const bw = W/hist.length - 6;
+    const bx = i * (W/hist.length) + 3;
+    const bh = (x.kcal/maxV) * H;
+    const by = H - bh;
+    return `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="3" fill="var(--accent)" opacity="0.7"/>`;
+  }).join('');
+  return `<div class="card">
+    <div class="h2">🔥 Сожжено на тренировках</div>
+    <div class="sub" style="margin:0 0 8px;">За последние ${hist.length} дней</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;">
+      ${bars}
+    </svg>
+    <div class="sub" style="font-size:11px; text-align:center; margin-top:6px;">${hist[hist.length-1].kcal||0} ккал сегодня · ~${tdee} ккал/день твой TDEE</div>
+  </div>`;
+}
 function finishWorkout(){
   const totalSetsCount = session.exercises.reduce((a,e)=>a+e.sets.length,0);
   state.workouts.push({name:session.day.label, date:new Date().toISOString(), duration:totalSetsCount*3, exercises:session.exercises.filter(e=>e.sets.length)});
-  state.currentDayIndex++; state.points += totalSetsCount*10;
+    state.currentDayIndex++; state.points += totalSetsCount*10;
+  saveDailyCalories();
   saveState();
   $('workoutScreen').classList.remove('show');
   session = null;
@@ -1483,6 +1633,7 @@ function renderProfile(){
       <div class="m-row"><span>TDEE (с активностью)</span><b>${m.tdee} ккал/день</b></div>
       <div class="m-row"><span>Рекомендуемые калории</span><b style="color:var(--accent);">${m.tc} ккал/день</b></div>
     </div>
+        ${caloriesCard()}
     <div class="card"><div class="h2">Питание <span class="pbadge">⭐ Premium</span></div>${lockWrap(bar('Белки',mc.protein,mc.protein*4,'var(--accent)')+bar('Жиры',mc.fat,mc.fat*9,'var(--accent-secondary)')+bar('Углеводы',mc.carbs,mc.carbs*4,'var(--gold)')+`<div class="m-row"><span>Норма воды</span><b>${m.water} л/день</b></div>`)}</div>
     <div class="card"><div class="h2">Рабочие веса <span class="pbadge">⭐ Premium</span></div>${lockWrap(recommendedWeights(p.weight,state.user.level).map(r=>`<div class="m-row"><span>${r.name}</span><b>${r.weight} ${r.unit}</b></div>`).join(''))}</div>
     <div class="card"><div class="h2">Прогноз цели <span class="pbadge">⭐ Premium</span></div>${lockWrap(fcHTML+(reached?'':weightSpark(hist)))}</div>
@@ -1837,7 +1988,7 @@ function wrappedCheck(){
 
 /* ---------- DELEGATED CLICKS ---------- */
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-share],[data-freeze],[data-buypts],[data-buystar],[data-quests],[data-calendar],[data-warmup],[data-music],[data-tech],[data-water],[data-calnav],[data-calday],[data-mplay],[data-mopen],[data-madd],[data-msearch],[data-plact],[data-pldel],[data-msr],[data-rsave],[data-wrapped],[data-wshare]');
+    const t = e.target.closest('[data-share],[data-freeze],[data-buypts],[data-buystar],[data-quests],[data-calendar],[data-warmup],[data-music],[data-tech],[data-water],[data-sleep],[data-calnav],[data-calday],[data-mplay],[data-mopen],[data-madd],[data-msearch],[data-plact],[data-pldel],[data-msr],[data-rsave],[data-wrapped],[data-wshare]');
   if(!t) return;
   haptic('light');
   const d = t.dataset;
@@ -1852,7 +2003,8 @@ document.addEventListener('click', e => {
   else if('plact' in d){ state.user.activePlaylist = parseInt(d.plact); saveState(); renderProfile(); }
   else if('pldel' in d){ const i = parseInt(d.pldel); state.user.playlists.splice(i,1); if(state.user.activePlaylist>=state.user.playlists.length) state.user.activePlaylist = Math.max(0, state.user.playlists.length-1); saveState(); renderProfile(); }
   else if('tech' in d) openTech(d.tech);
-  else if('water' in d) waterStep(parseFloat(d.water));
+    else if('water' in d) waterStep(parseFloat(d.water));
+  else if('sleep' in d) setSleep(parseInt(d.sleep,10));
   else if('calnav' in d){ calOff = Math.min(0, calOff+parseInt(d.calnav,10)); renderCalendar(); }
   else if('calday' in d) openDay(d.calday);
   else if('msr' in d) saveMeasure();
